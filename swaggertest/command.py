@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import re
 import json
 import pathlib
 from collections import defaultdict
@@ -22,6 +22,11 @@ from jsonpointer import resolve_pointer
 from jsonschema import Draft7Validator, draft7_format_checker
 from jsonref import JsonRef
 from cliff.command import Command
+
+re_additional_properties = re.compile(
+    r"Additional properties are not allowed "
+    r"\(((?:'\w+', )*'\w+') (?:were|was) unexpected\)"
+)
 
 
 class TestSchemas(Command):
@@ -58,6 +63,7 @@ class TestSchemas(Command):
         spec = JsonRef.replace_refs(spec)
         errors = defaultdict(list)
         schemas = resolve_pointer(spec, args.path)
+        validators = {}
         for schema_name, schema in schemas.items():
             example = schema.get("example")
             if not example:
@@ -67,6 +73,7 @@ class TestSchemas(Command):
                 validator = Draft7Validator(
                     schema, format_checker=draft7_format_checker
                 )
+                validators[schema_name] = validator
                 for error in validator.iter_errors(example):
                     errors[schema_name].append(error)
             except Exception as error:
@@ -88,3 +95,38 @@ class TestSchemas(Command):
                             + "]"
                         )
                     print(f"    - {path}: {err.message}")
+                    if err.validator == "additionalProperties":
+                        print_possible_fixes(err, sname, validators, args.path)
+
+
+def print_possible_fixes(err, sname, validators, path):
+    mo = re_additional_properties.match(err.message)
+    if not mo:
+        breakpoint()
+        print("Invalid error message", repr(err))
+    quoted_names = mo.group(1).split(", ")
+    property_names = [pn[1:-1] for pn in quoted_names]
+
+    prefix = "#" + path[1:]
+    lines = []
+    for pname in property_names:
+        value = err.instance[pname]
+        fixes = possible_fixes(value, validators)
+        for fix in fixes:
+            lines.append(f"{pname}:")
+            lines.append(f"  $ref: '{prefix}/{fix}'")
+    if lines:
+        print("      Possible fixes:")
+        for line in lines:
+            print("        ", line)
+
+
+def possible_fixes(value, validators):
+    result = []
+    for sname, validator in validators.items():
+        try:
+            validator.validate(value)
+        except Exception:
+            continue
+        result.append(sname)
+    return result
